@@ -1,0 +1,28 @@
+# R package build artifacts
+*.Rproj.user
+*.Rhistory
+*.RData
+*.Ruserdata
+.Rproj.user/
+
+# Build / check directories
+/doc/
+/Meta/
+/inst/doc/
+src/*.o
+src/*.so
+src/*.dll
+
+# R package check output
+/*.Rcheck/
+
+# roxygen2 cache
+/.cache/
+
+# macOS
+.DS_Store
+
+# vignette intermediates
+vignettes/*.html
+vignettes/*.pdf
+vignettes/*.R
