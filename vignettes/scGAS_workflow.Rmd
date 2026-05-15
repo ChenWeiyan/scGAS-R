@@ -29,7 +29,7 @@ it returns a standalone `cpf` object.
 
 | Step | Function | What is added |
 |------|----------|---------------|
-| 1 | `scgas_preprocess()` | creates `SeuratObject` (ATAC assay, LSI, UMAP, KNN graph) |
+| 1 | `scgas_preprocess()` | creates `SeuratObject` (ATAC assay, LSI, UMAP, KNN graph); genome and annotation auto-detected |
 | 2 | `scgas_metacell()` | `obj$mc_membership` + `obj@misc$mc_membership` |
 | 3 | `scgas_train_models()` | `obj@misc$scgas_models` |
 | 4 | `scgas_compute()` | `scGAS` assay, `scgaspca` and `scgasumap` reductions |
@@ -88,36 +88,22 @@ data_dir      <- "data"   # contains hg19_500bp_CRE.bed, ENCODE *.gz files
 
 ---
 
-## Step 0 — Gene annotations
-
-`scgas_preprocess()` detects the genome assembly from the fragment file header
-(written by CellRanger / CellRanger-ARC) and sets both `seqlevelsStyle` and
-`genome` on the annotation automatically.  You only need `GetGRangesFromEnsDb()`.
-
-```{r annotations}
-library(EnsDb.Hsapiens.v75)
-library(Signac)
-
-## No seqlevelsStyle() or genome() call needed — handled by scgas_preprocess()
-annotation <- GetGRangesFromEnsDb(EnsDb.Hsapiens.v75)
-```
-
----
-
 ## Step 1 — Preprocess
 
 `scgas_preprocess()` handles everything from raw fragment files to a
-dimensionality-reduced `SeuratObject`.
+dimensionality-reduced `SeuratObject`. The genome assembly is auto-detected
+from the fragment file header, and the matching gene annotation is loaded
+automatically from the appropriate `EnsDb` package — no manual annotation
+step is needed.
 
 ```{r preprocess}
 library(scGAS)
 
-## Genome is auto-detected from the fragment header.
+## Genome and annotation are resolved automatically.
 ## CRE BED and ENCODE reference files are found automatically in data_dir.
 obj <- scgas_preprocess(
   fragment_path     = fragment_file,
   data_dir          = data_dir,
-  annotation        = annotation,
   lsi_dims          = 2:30,
   umap_n_components = 3L,
   n_cores           = 8

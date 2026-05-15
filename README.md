@@ -70,21 +70,18 @@ scgas_download_reference(genome = "hg19", data_dir = "data")
 
 ## Quick Start
 
+Gene annotations are loaded automatically from the matching `EnsDb` package
+based on the detected genome — no manual annotation step needed.
+
 ```r
 library(scGAS)
-library(EnsDb.Hsapiens.v75)
-library(Signac)
 
-# Gene annotations — genome style will be set automatically by scgas_preprocess()
-# Choose bsed on your data
-annotation <- GetGRangesFromEnsDb(EnsDb.Hsapiens.v75)
-
-# Step 1: Preprocess scATAC-seq (genome auto-detected from fragment header)
+# Step 1: Preprocess scATAC-seq
+# Genome is auto-detected from the fragment header; annotation is auto-loaded.
 obj <- scgas_preprocess(
-  fragment_path     = "fragments.tsv.gz",
-  data_dir          = "data",
-  annotation        = annotation,
-  n_cores           = 8
+  fragment_path = "fragments.tsv.gz",
+  data_dir      = "data",
+  n_cores       = 8
 )
 
 # Step 2: Construct Metacells
@@ -115,7 +112,7 @@ exception — it returns a standalone `cpf` object.
 | Step | Function | What is added |
 |------|----------|---------------|
 | 0 | `scgas_download_reference()` | downloads reference files from Zenodo |
-| 1 | `scgas_preprocess()` | creates `SeuratObject` (ATAC assay, LSI, UMAP, KNN graph) |
+| 1 | `scgas_preprocess()` | creates `SeuratObject` (ATAC assay, LSI, UMAP, KNN graph); genome and annotation auto-detected |
 | 2 | `scgas_metacell()` | `obj$mc_membership` + `obj@misc$mc_membership` |
 | 3 | `scgas_train_models()` | `obj@misc$scgas_models` |
 | 4 | `scgas_compute()` | `scGAS` assay, `scgaspca` and `scgasumap` reductions |

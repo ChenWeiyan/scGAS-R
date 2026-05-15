@@ -23,12 +23,16 @@
 #' in \code{seurat_obj@@misc} so that \code{\link{scgas_train_models}} can
 #' load the correct ENCODE reference files automatically.
 #'
-#' ## Annotation preparation
+#' ## Annotation
 #'
-#' When \code{annotation} is supplied, its \code{seqlevelsStyle} and
-#' \code{genome} are set automatically to match the fragment file and the
-#' resolved genome — no manual \code{seqlevelsStyle()} or \code{genome()}
-#' call needed.
+#' Gene annotations are resolved automatically from the detected genome
+#' assembly using the appropriate \code{EnsDb} package
+#' (\code{EnsDb.Hsapiens.v75} for hg19, \code{EnsDb.Hsapiens.v86} for hg38).
+#' \code{seqlevelsStyle} and \code{genome} are set to match the fragment file.
+#' No manual annotation step is needed.
+#'
+#' To override, pass a \code{GRanges} object via the \code{annotation}
+#' argument; style and genome will still be adjusted automatically.
 #'
 #' @param fragment_path Path to a fragment file (\code{.tsv.gz}).  For
 #'   multi-replicate datasets supply a character vector — one element per
@@ -46,9 +50,10 @@
 #'   multiome data.
 #' @param meta_data Optional data frame of per-cell metadata (row names =
 #'   cell barcodes).
-#' @param annotation \code{GRanges} of gene annotations obtained with
-#'   \code{Signac::GetGRangesFromEnsDb()}.  \code{seqlevelsStyle} and
-#'   \code{genome} are set automatically — pass the raw object.
+#' @param annotation Optional \code{GRanges} of gene annotations.  When
+#'   \code{NULL} (default) the appropriate \code{EnsDb} package is loaded
+#'   automatically based on the detected genome.  \code{seqlevelsStyle} and
+#'   \code{genome} are always set automatically.
 #' @param cell_barcodes Optional character vector of barcodes to retain.
 #' @param replicate_ids Character vector of replicate labels when
 #'   \code{fragment_path} is a vector.  Defaults to \code{"rep1"},
@@ -76,24 +81,17 @@
 #'
 #' @examples
 #' \dontrun{
-#' library(EnsDb.Hsapiens.v75)
-#' library(Signac)
-#'
-#' ## Genome and seqlevels style are set automatically
-#' annotation <- GetGRangesFromEnsDb(EnsDb.Hsapiens.v75)
-#'
+#' ## Genome is auto-detected; annotation is loaded automatically from EnsDb
 #' obj <- scgas_preprocess(
 #'   fragment_path = "datasets/10k_Human_Brain_MO_gemx_atac_fragments.tsv.gz",
-#'   data_dir      = "data",
-#'   annotation    = annotation
+#'   data_dir      = "data"
 #' )
 #'
-#' ## Override genome detection explicitly
+#' ## Override genome detection explicitly (annotation still auto-loaded)
 #' obj <- scgas_preprocess(
 #'   fragment_path  = "datasets/my_atac_fragments.tsv.gz",
 #'   data_dir       = "data",
-#'   genome_version = "hg38",
-#'   annotation     = annotation
+#'   genome_version = "hg38"
 #' )
 #' }
 #'
@@ -144,6 +142,10 @@ scgas_preprocess <- function(fragment_path,
       genome_version <- "hg19"
     }
   }
+
+  ## ── Auto-load annotation if not supplied ─────────────────────────────────
+  if (is.null(annotation))
+    annotation <- .auto_annotation(genome_version, verbose)
 
   ## ── Resolve data directory ────────────────────────────────────────────────
   data_dir <- .resolve_data_dir(data_dir, verbose)
@@ -461,6 +463,40 @@ scgas_preprocess <- function(fragment_path,
     GenomeInfoDb::seqlevels(gr) <- paste0("chr", GenomeInfoDb::seqlevels(gr))
   }
   return(gr)
+}
+
+
+# --------------------------------------------------------------------------
+# .auto_annotation: load the appropriate EnsDb package for a given genome
+# and return a GRanges annotation object. Returns NULL (with a warning) if
+# the required package is not installed.
+# --------------------------------------------------------------------------
+#' @keywords internal
+.auto_annotation <- function(genome_version, verbose = TRUE) {
+  pkg_map <- c(
+    hg19 = "EnsDb.Hsapiens.v75",
+    hg38 = "EnsDb.Hsapiens.v86",
+    mm10 = "EnsDb.Mmusculus.v79",
+    mm39 = "EnsDb.Mmusculus.v109"
+  )
+  pkg <- pkg_map[[genome_version]]
+  if (is.null(pkg)) {
+    if (verbose)
+      message("[scGAS] No EnsDb package mapped for genome '", genome_version,
+              "'. Proceeding without annotation (TSS enrichment unavailable).")
+    return(NULL)
+  }
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    warning("[scGAS] Package '", pkg, "' is required for automatic annotation ",
+            "with genome '", genome_version, "' but is not installed.\n",
+            "Install it with: BiocManager::install(\"", pkg, "\")\n",
+            "Proceeding without annotation (TSS enrichment unavailable).")
+    return(NULL)
+  }
+  if (verbose) message("[scGAS] Auto-loading annotation from ", pkg)
+  db  <- get(pkg, envir = asNamespace(pkg))
+  ann <- Signac::GetGRangesFromEnsDb(ensdb = db, verbose = FALSE)
+  return(ann)
 }
 
 
