@@ -20,8 +20,10 @@
 #' | 4 | \code{\link{scgas_compute}} | \code{SeuratObject} → adds \code{scGAS} assay, \code{scgaspca}, \code{scgasumap} |
 #' | 5 | \code{\link{scgas_chromatin_potential}} | \code{SeuratObject} → \code{\link{cpf}} object (arrows, plot, HVG matrices, embedding) |
 #'
-#' The helper \code{\link{scgas_add_assay}} lets you re-attach a pre-computed
-#' scGAS matrix (or re-run dimensionality reduction) without re-computing GAS.
+#' \code{\link{scgas_download_reference}} downloads the ENCODE reference files
+#' from Zenodo into a local \code{data_dir} — run once after installation.
+#' \code{\link{scgas_add_assay}} re-attaches a pre-computed scGAS matrix or
+#' re-runs dimensionality reduction without recomputing GAS.
 #'
 #' @docType package
 #' @name scGAS-package

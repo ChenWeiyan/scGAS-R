@@ -57,14 +57,23 @@ remotes::install_github("ChenWeiyan/scGAS", subdir = "scGAS-R")
 
 ## Required reference files
 
-Download from the scGAS data repository (Zenodo DOI: 10.5281/zenodo.19134899):
+Reference files (~570 MB for hg19) are hosted on Zenodo.  Download them once
+after installing the package:
 
-| File | Description |
-|------|-------------|
-| `hg19_500bp_CRE.bed` | Reference cCRE BED (1.8 M × 500 bp bins) |
-| `ENCODE_167Tissue_SigAss_pVal.05.rds` | cCRE–Gene association list (p < 0.05) |
-| `ENCODE_167Tissue_RNA_LogNorm.rds` | ENCODE bulk RNA-seq, log-normalised |
-| `ENCODE_167Tissue_CRE_LogNorm.rds` | ENCODE bulk DNase-seq, log-normalised |
+```{r download}
+## Downloads all hg19 reference files into ./data/
+scgas_download_reference(genome = "hg19", data_dir = "data")
+
+## hg38 (when available):
+# scgas_download_reference(genome = "hg38", data_dir = "data")
+```
+
+| File | Size | Description |
+|------|------|-------------|
+| `hg19_500bp_CRE.bed` | 68 MB | Reference cCRE BED (1.8 M × 500 bp bins) |
+| `ENCODE_167Tissue_SigAss_pVal.05.gz` | 30 MB | cCRE–Gene association list (p < 0.05) |
+| `ENCODE_167Tissue_RNA_LogNorm.gz` | 13 MB | ENCODE bulk RNA-seq, log-normalised |
+| `ENCODE_167Tissue_CRE_LogNorm.gz` | 448 MB | ENCODE bulk DNase-seq, log-normalised |
 
 ---
 
