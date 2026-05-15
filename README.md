@@ -39,15 +39,14 @@ BiocManager::install(c(
 install.packages(c("Seurat", "glmnet", "glmnetUtils", "igraph", "ggplot2"))
 
 # Install scGAS from GitHub
-remotes::install_github("ChenWeiyan/scGAS", subdir = "scGAS-R")
+remotes::install_github("ChenWeiyan/scGAS-R")
 ```
 
 ---
 
 ## Reference data
 
-Pre-computed ENCODE reference files (~570 MB for hg19) are hosted on
-[Zenodo](https://zenodo.org) *(10.5281/zenodo.19134899)* and can be
+Pre-computed ENCODE reference files (~570 MB for hg19) are hosted on *xxx* and can be
 downloaded in one call after installing the package:
 
 ```r
@@ -56,7 +55,7 @@ library(scGAS)
 # Download all hg19 reference files into ./data/
 scgas_download_reference(genome = "hg19", data_dir = "data")
 
-# hg38 (when available):
+# hg38 (optional):
 # scgas_download_reference(genome = "hg38", data_dir = "data")
 ```
 
@@ -76,7 +75,8 @@ library(scGAS)
 library(EnsDb.Hsapiens.v75)
 library(Signac)
 
-# Gene annotations — genome style is set automatically by scgas_preprocess()
+# Gene annotations — genome style will be set automatically by scgas_preprocess()
+# Choose bsed on your data
 annotation <- GetGRangesFromEnsDb(EnsDb.Hsapiens.v75)
 
 # Step 1: Preprocess scATAC-seq (genome auto-detected from fragment header)
