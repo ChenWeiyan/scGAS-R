@@ -37,6 +37,78 @@ it returns a standalone `cpf` object.
 
 ---
 
+## Checkpointing & output
+
+Every pipeline function accepts three shared parameters that control on-disk
+output and resumability:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `out_dir` | `NULL` | Base output directory. Set once in `scgas_preprocess()`; inherited automatically by all downstream functions via `obj@misc`. |
+| `run_name` | `"scgas_run"` | Run label. All files go to `out_dir/run_name/`. |
+| `save_obj` | `FALSE` | Write the returned object (SeuratObject or `cpf`) to `out_dir/run_name/` after each step. |
+
+### Recommended pattern
+
+Set `out_dir` and `run_name` once at the start — they propagate through the
+pipeline without needing to repeat them:
+
+```{r checkpointing}
+obj <- scgas_preprocess(
+  fragment_path = fragment_file,
+  data_dir      = data_dir,
+  out_dir       = "results",       # shared across all steps
+  run_name      = "brain_run1",    # results/brain_run1/
+  save_obj      = TRUE,            # → seurat_preprocessed.rds
+  n_cores       = 8
+)
+
+obj <- scgas_metacell(obj, save_obj = TRUE)      # → seurat_metacell.rds
+obj <- scgas_train_models(obj, n_cores = 8)      # checkpoints every gene model
+obj <- scgas_compute(obj, save_obj = TRUE)       # → seurat_scgas_computed.rds
+cpf <- scgas_chromatin_potential(obj, save_obj = TRUE)   # → cpf.rds
+```
+
+### Files written to `out_dir/run_name/`
+
+| File | Step | Notes |
+|------|------|-------|
+| `seurat_preprocessed.rds` | 1 | `save_obj = TRUE` |
+| `mc_membership.rds` | 2 | always written (checkpoint) |
+| `seurat_metacell.rds` | 2 | `save_obj = TRUE` |
+| `atac_cl_lognorm.rds` | 3 | always written (checkpoint) |
+| `gene_cres.rds` | 3 | always written (checkpoint) |
+| `models/{gene}.rds` | 3 | always written per gene (checkpoint) |
+| `seurat_models_trained.rds` | 3 | `save_obj = TRUE` |
+| `scgas_mat.rds` | 4 | always written (checkpoint) |
+| `seurat_scgas_computed.rds` | 4 | `save_obj = TRUE` |
+| `cpf.rds` | 5 | `save_obj = TRUE` |
+
+### Resuming an interrupted run
+
+If the session is interrupted (e.g. during model training), re-run the same
+commands with the same `out_dir`/`run_name`. Each function detects its
+checkpoint files and skips already-completed work:
+
+```{r resume}
+## Re-run after interruption — only missing gene models are trained
+obj <- scgas_train_models(obj, n_cores = 8)
+# [scGAS] Resuming: 4823/12041 gene models already on disk, training remaining 7218
+```
+
+You can also override `out_dir` or `run_name` in any individual call to branch
+into a new run:
+
+```{r branch_run}
+obj2 <- readRDS("results/brain_run1/seurat_models_trained.rds")
+obj2 <- scgas_compute(obj2,
+                      out_dir  = "results",
+                      run_name = "brain_run2",   # separate output folder
+                      save_obj = TRUE)
+```
+
+---
+
 ## Installation
 
 ```{r install}
@@ -101,17 +173,23 @@ library(scGAS)
 
 ## Genome and annotation are resolved automatically.
 ## CRE BED and ENCODE reference files are found automatically in data_dir.
+## out_dir and run_name are stored in obj@misc and inherited by all downstream steps.
 obj <- scgas_preprocess(
   fragment_path     = fragment_file,
   data_dir          = data_dir,
   lsi_dims          = 2:30,
   umap_n_components = 3L,
-  n_cores           = 8
+  n_cores           = 8,
+  out_dir           = "results",    # optional; enables checkpointing
+  run_name          = "brain_run1", # output goes to results/brain_run1/
+  save_obj          = TRUE          # saves seurat_preprocessed.rds
 )
 
-## genome_version and data_dir are stored in obj@misc for downstream steps
+## genome_version, data_dir, out_dir, and run_name are stored in obj@misc
 obj@misc$genome_version   # e.g. "hg38" or "hg19"
 obj@misc$data_dir
+obj@misc$out_dir
+obj@misc$run_name
 
 ## Override genome detection if needed (skips auto-detection entirely)
 # obj <- scgas_preprocess(..., genome_version = "hg19")
@@ -146,13 +224,16 @@ walktrap community detection, and writes `mc_membership` back into
 `obj$mc_membership`.
 
 ```{r metacell}
+## out_dir and run_name are inherited from obj@misc automatically.
+## Pass them explicitly only if you want to override.
 obj <- scgas_metacell(
   obj,
   graph_name = "ATAC_snn",
   gamma      = 20,
   min_size   = 10,
   max_size   = 100,
-  n_cores    = 8
+  n_cores    = 8,
+  save_obj   = TRUE   # saves seurat_metacell.rds; mc_membership.rds always written
 )
 
 ## Inspect Metacell assignments
@@ -169,8 +250,15 @@ ENCODE reference files from `obj@misc$data_dir` / `obj@misc$genome_version`
 automatically.  No file paths needed.
 
 ```{r train}
-## Simplest call — everything resolved from obj@misc
-obj <- scgas_train_models(obj, n_cores = 8)
+## out_dir/run_name inherited from obj@misc.
+## Gene models are saved to results/brain_run1/models/{gene}.rds as they complete.
+## Intermediate matrices (atac_cl_lognorm, gene_cres) are also cached.
+## Re-running with the same out_dir/run_name resumes from the last checkpoint.
+obj <- scgas_train_models(
+  obj,
+  n_cores  = 8,
+  save_obj = TRUE   # saves seurat_models_trained.rds
+)
 
 message(length(obj@misc$scgas_models), " genes modelled")
 
@@ -188,6 +276,7 @@ automatically.  It adds a `scGAS` assay and `scgaspca` / `scgasumap`
 reductions to the returned object.
 
 ```{r compute}
+## scgas_mat.rds is always cached; re-running loads it and skips computation.
 obj <- scgas_compute(
   seurat_obj        = obj,
   lsi_dims          = 2:30,
@@ -197,11 +286,12 @@ obj <- scgas_compute(
   run_dim_reduction = TRUE,
   n_pcs             = 30,
   n_neighbors       = 30,
-  n_cores           = 8
+  n_cores           = 8,
+  save_obj          = TRUE   # saves seurat_scgas_computed.rds
 )
 
 ## Inspect the scGAS assay
-dim(obj@assays$scGAS)    # genes x cells
+dim(obj@assays$scGAS)          # genes x cells
 range(obj@assays$scGAS@data)   # 0 – 1
 ```
 
@@ -225,6 +315,7 @@ the arrow data, the ggplot, the HVG matrices, the embedding, and the
 parameters used — all independent of the `SeuratObject`.
 
 ```{r cpf}
+## save_obj = TRUE writes cpf.rds to results/brain_run1/
 cpf_result <- scgas_chromatin_potential(
   seurat_obj   = obj,
   n_hvg        = 2000,
@@ -233,7 +324,8 @@ cpf_result <- scgas_chromatin_potential(
   arrow_scale  = 1.5,
   arrow_colour = "steelblue",
   point_colour = "mc_membership",
-  title        = "Human Brain — Chromatin Potential Field"
+  title        = "Human Brain — Chromatin Potential Field",
+  save_obj     = TRUE
 )
 
 ## cpf object summary
