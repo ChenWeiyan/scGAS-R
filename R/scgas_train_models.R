@@ -150,7 +150,7 @@ scgas_train_models <- function(seurat_obj,
       MatrixGenerics::rowSums2(count_mat[, sel, drop = FALSE])
   }
 
-  sf <- floor(encode_lib_size * length(feat_inter) / nrow(encode_dnase_lognorm))
+  sf <- floor(as.numeric(encode_lib_size) * length(feat_inter) / nrow(encode_dnase_lognorm))
   if (verbose) message("[scGAS] Library-size scaling factor: ", sf)
   atac_cl_lognorm <- log2(t(t(atac_cl_mat) / colSums(atac_cl_mat)) * sf + 1)
 
