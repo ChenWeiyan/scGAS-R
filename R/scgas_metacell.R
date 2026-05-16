@@ -46,6 +46,13 @@
 #'   stage.  Uses \code{parallel::mclapply} (Unix) or sequential fallback
 #'   (Windows).  Default \code{1L}.
 #' @param verbose Logical.  Print progress messages.  Default \code{TRUE}.
+#' @param out_dir Base output directory.  \code{NULL} (default) inherits from
+#'   \code{seurat_obj@@misc$out_dir} set by \code{\link{scgas_preprocess}}.
+#'   Pass an explicit path to override.
+#' @param run_name Run label.  \code{NULL} (default) inherits from
+#'   \code{seurat_obj@@misc$run_name}.  Pass an explicit string to override.
+#' @param save_obj Logical.  Save the returned \code{SeuratObject} to
+#'   \code{out_dir/run_name/seurat_metacell.rds}.  Default \code{FALSE}.
 #'
 #' @return The input \code{SeuratObject} with a new metadata column
 #'   \code{mc_membership} (integer Metacell index per cell).  The membership
@@ -85,9 +92,41 @@ scgas_metacell <- function(seurat_obj,
                            min_remaining        = 30L,
                            walktrap_steps       = 4L,
                            n_cores              = 1L,
-                           verbose              = TRUE) {
+                           verbose              = TRUE,
+                           out_dir              = NULL,
+                           run_name             = NULL,
+                           save_obj             = FALSE) {
 
   stopifnot(inherits(seurat_obj, "Seurat"))
+
+  ## ── Resolve run directory ─────────────────────────────────────────────────
+  rd <- .resolve_run_dir(out_dir, run_name, seurat_obj@misc, verbose)
+  mc_cache_path <- if (rd$use_cache) file.path(rd$run_dir, "mc_membership.rds") else NULL
+
+  if (rd$use_cache && file.exists(mc_cache_path)) {
+    if (verbose) message("[scGAS] Loading cached Metacell membership from ", mc_cache_path)
+    membership <- readRDS(mc_cache_path)
+    names(membership) <- colnames(seurat_obj)
+    n_final <- max(membership)
+    sizes   <- tabulate(membership, nbins = n_final)
+    if (verbose)
+      message("[scGAS] Loaded ", n_final, " metacells  (size range: ",
+              min(sizes), " – ", max(sizes), ")")
+    seurat_obj <- Seurat::AddMetaData(
+      seurat_obj,
+      metadata = data.frame(mc_membership = membership[colnames(seurat_obj)],
+                            row.names     = colnames(seurat_obj))
+    )
+    seurat_obj@misc$mc_membership <- membership
+    seurat_obj@misc$out_dir       <- rd$out_dir
+    seurat_obj@misc$run_name      <- rd$run_name
+    if (save_obj && rd$use_cache) {
+      obj_path <- file.path(rd$run_dir, "seurat_metacell.rds")
+      if (verbose) message("[scGAS] Saving metacell object to ", obj_path)
+      saveRDS(seurat_obj, obj_path)
+    }
+    return(seurat_obj)
+  }
 
   if (!graph_name %in% names(seurat_obj@graphs))
     stop("[scGAS] Graph '", graph_name, "' not found in seurat_obj@graphs. ",
@@ -210,6 +249,20 @@ scgas_metacell <- function(seurat_obj,
     )
   )
   seurat_obj@misc$mc_membership <- membership
+  seurat_obj@misc$out_dir       <- rd$out_dir
+  seurat_obj@misc$run_name      <- rd$run_name
+
+  if (rd$use_cache) {
+    dir.create(rd$run_dir, recursive = TRUE, showWarnings = FALSE)
+    if (verbose) message("[scGAS] Saving Metacell membership to ", mc_cache_path)
+    saveRDS(membership, mc_cache_path)
+  }
+
+  if (save_obj && rd$use_cache) {
+    obj_path <- file.path(rd$run_dir, "seurat_metacell.rds")
+    if (verbose) message("[scGAS] Saving metacell object to ", obj_path)
+    saveRDS(seurat_obj, obj_path)
+  }
 
   return(seurat_obj)
 }

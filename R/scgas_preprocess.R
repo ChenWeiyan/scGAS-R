@@ -67,6 +67,17 @@
 #' @param umap_n_components Number of UMAP components.  Default \code{3}.
 #' @param n_cores Cores for \code{parallel::mclapply}.  Default \code{1}.
 #' @param verbose Logical.  Default \code{TRUE}.
+#' @param out_dir Path to a base output directory shared by all pipeline steps.
+#'   Stored in \code{seurat_obj@@misc$out_dir} so downstream functions
+#'   (\code{scgas_metacell}, \code{scgas_train_models}, \code{scgas_compute})
+#'   inherit it automatically.  \code{NULL} disables disk caching for all
+#'   steps.
+#' @param run_name Character label for this analysis run.  All intermediate
+#'   files are written under \code{out_dir/run_name/}.  Stored in
+#'   \code{seurat_obj@@misc$run_name}.  Default \code{"scgas_run"}.
+#' @param save_obj Logical.  Save the returned \code{SeuratObject} to
+#'   \code{out_dir/run_name/seurat_preprocessed.rds}.  Requires \code{out_dir}
+#'   to be set.  Default \code{FALSE}.
 #'
 #' @return A \code{SeuratObject} with:
 #'   \describe{
@@ -77,6 +88,8 @@
 #'     \item{\code{misc$ref_cre_gr}}{Reference cCRE \code{GRanges}.}
 #'     \item{\code{misc$genome_version}}{Resolved genome assembly string.}
 #'     \item{\code{misc$data_dir}}{Resolved path to reference data directory.}
+#'     \item{\code{misc$out_dir}}{Base output directory (or \code{NULL}).}
+#'     \item{\code{misc$run_name}}{Run label used by downstream functions.}
 #'   }
 #'
 #' @examples
@@ -118,7 +131,10 @@ scgas_preprocess <- function(fragment_path,
                              lsi_dims               = 2:30,
                              umap_n_components      = 3L,
                              n_cores                = 1L,
-                             verbose                = TRUE) {
+                             verbose                = TRUE,
+                             out_dir                = NULL,
+                             run_name               = "scgas_run",
+                             save_obj               = FALSE) {
 
   ## ── Validate fragment paths ───────────────────────────────────────────────
   stopifnot(is.character(fragment_path), length(fragment_path) >= 1)
@@ -262,9 +278,20 @@ scgas_preprocess <- function(fragment_path,
   obj@misc$ref_cre_gr      <- ref_cre_gr
   obj@misc$genome_version  <- genome_version
   obj@misc$data_dir        <- data_dir
+  obj@misc$out_dir         <- out_dir
+  obj@misc$run_name        <- run_name
 
   if (verbose) message("[scGAS] Preprocessing complete: ",
                        ncol(obj), " cells, ", nrow(obj), " cCREs  [", genome_version, "]")
+
+  if (save_obj && !is.null(out_dir)) {
+    run_dir  <- file.path(out_dir, run_name)
+    dir.create(run_dir, recursive = TRUE, showWarnings = FALSE)
+    obj_path <- file.path(run_dir, "seurat_preprocessed.rds")
+    if (verbose) message("[scGAS] Saving preprocessed object to ", obj_path)
+    saveRDS(obj, obj_path)
+  }
+
   return(obj)
 }
 
@@ -497,6 +524,33 @@ scgas_preprocess <- function(fragment_path,
   db  <- get(pkg, envir = asNamespace(pkg))
   ann <- Signac::GetGRangesFromEnsDb(ensdb = db, verbose = FALSE)
   return(ann)
+}
+
+
+# --------------------------------------------------------------------------
+# .resolve_run_dir: resolve out_dir / run_name from the function parameter
+# (highest priority) or from seurat_obj@misc (inherited from a prior step).
+# Returns a list with out_dir, run_name, run_dir, and use_cache flag.
+# --------------------------------------------------------------------------
+#' @keywords internal
+.resolve_run_dir <- function(out_dir, run_name, misc, verbose) {
+  resolved_out  <- if (!is.null(out_dir))  out_dir  else misc$out_dir
+  resolved_name <- if (!is.null(run_name)) run_name else misc$run_name
+
+  if (is.null(resolved_out))
+    return(list(out_dir = NULL, run_name = NULL, run_dir = NULL, use_cache = FALSE))
+
+  if (is.null(resolved_name)) resolved_name <- "scgas_run"
+
+  if (verbose && is.null(out_dir) && !is.null(misc$out_dir))
+    message("[scGAS] Using run: ", file.path(resolved_out, resolved_name))
+
+  list(
+    out_dir   = resolved_out,
+    run_name  = resolved_name,
+    run_dir   = file.path(resolved_out, resolved_name),
+    use_cache = TRUE
+  )
 }
 
 

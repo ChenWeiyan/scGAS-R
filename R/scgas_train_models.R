@@ -38,15 +38,17 @@
 #' @param deviance_quantile Lambda selection threshold.  Default \code{0.95}.
 #' @param n_cores Cores for \code{parallel::mclapply}.  Default \code{1}.
 #' @param verbose Logical.  Default \code{TRUE}.
-#' @param out_dir Path to a base output directory.  All intermediate objects
-#'   and per-gene models are written under \code{out_dir/run_name/}.  Set to
-#'   \code{NULL} (default) to disable disk caching entirely.
-#' @param run_name Character string identifying this run.  Creates the
-#'   subdirectory \code{out_dir/run_name/} that holds all intermediate files
-#'   and a \code{models/} subfolder with one \code{.rds} per gene.  When the
-#'   function is re-run with the same \code{out_dir}/\code{run_name}, cached
-#'   intermediates are loaded from disk and already-trained gene models are
-#'   skipped.  Default \code{"scgas_run"}.
+#' @param out_dir Base output directory.  \code{NULL} (default) inherits from
+#'   \code{seurat_obj@@misc$out_dir} set by \code{\link{scgas_preprocess}}.
+#'   Pass an explicit path to override.  All intermediate objects and per-gene
+#'   models are written under \code{out_dir/run_name/}.
+#' @param run_name Run label.  \code{NULL} (default) inherits from
+#'   \code{seurat_obj@@misc$run_name}.  Pass an explicit string to override.
+#'   The subdirectory \code{out_dir/run_name/} holds all intermediate files
+#'   and a \code{models/} subfolder with one \code{.rds} per gene.  Re-running
+#'   with the same values resumes from the last checkpoint.
+#' @param save_obj Logical.  Save the returned \code{SeuratObject} to
+#'   \code{out_dir/run_name/seurat_models_trained.rds}.  Default \code{FALSE}.
 #'
 #' @return The input \code{SeuratObject} with fitted models stored in
 #'   \code{seurat_obj@@misc$scgas_models}.  Each element is named by gene and
@@ -88,7 +90,8 @@ scgas_train_models <- function(seurat_obj,
                                n_cores              = 1L,
                                verbose              = TRUE,
                                out_dir              = NULL,
-                               run_name             = "scgas_run") {
+                               run_name             = NULL,
+                               save_obj             = FALSE) {
 
   stopifnot(
     inherits(seurat_obj, "Seurat"),
@@ -97,9 +100,10 @@ scgas_train_models <- function(seurat_obj,
     is.numeric(deviance_quantile), deviance_quantile > 0, deviance_quantile <= 1
   )
 
-  ## ── Set up run directory ──────────────────────────────────────────────────
-  use_cache  <- !is.null(out_dir)
-  run_dir    <- if (use_cache) file.path(out_dir, run_name) else NULL
+  ## ── Resolve run directory ─────────────────────────────────────────────────
+  rd         <- .resolve_run_dir(out_dir, run_name, seurat_obj@misc, verbose)
+  use_cache  <- rd$use_cache
+  run_dir    <- rd$run_dir
   models_dir <- if (use_cache) file.path(run_dir, "models") else NULL
   if (use_cache) {
     dir.create(models_dir, recursive = TRUE, showWarnings = FALSE)
@@ -294,6 +298,15 @@ scgas_train_models <- function(seurat_obj,
 
   ## ── Store in SeuratObject and return ─────────────────────────────────────
   seurat_obj@misc$scgas_models <- trained_models
+  seurat_obj@misc$out_dir      <- rd$out_dir
+  seurat_obj@misc$run_name     <- rd$run_name
+
+  if (save_obj && use_cache) {
+    obj_path <- file.path(run_dir, "seurat_models_trained.rds")
+    if (verbose) message("[scGAS] Saving trained-model object to ", obj_path)
+    saveRDS(seurat_obj, obj_path)
+  }
+
   return(seurat_obj)
 }
 

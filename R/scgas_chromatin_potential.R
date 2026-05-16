@@ -101,6 +101,12 @@ summary.cpf <- function(object, ...) {
 #'   coordinates.  \code{NULL} (default) uses \code{scgasumap} if present,
 #'   else \code{umap}.
 #' @param verbose Logical.  Default \code{TRUE}.
+#' @param out_dir Base output directory.  \code{NULL} (default) inherits from
+#'   \code{seurat_obj@@misc$out_dir}.  Pass an explicit path to override.
+#' @param run_name Run label.  \code{NULL} (default) inherits from
+#'   \code{seurat_obj@@misc$run_name}.  Pass an explicit string to override.
+#' @param save_obj Logical.  Save the returned \code{cpf} object to
+#'   \code{out_dir/run_name/cpf.rds}.  Default \code{FALSE}.
 #'
 #' @return A \code{\link{cpf}} object with elements:
 #'   \describe{
@@ -156,9 +162,15 @@ scgas_chromatin_potential <- function(seurat_obj,
                                      arrow_alpha      = 0.7,
                                      title            = "Chromatin Potential Field",
                                      embedding_coords = NULL,
-                                     verbose          = TRUE) {
+                                     verbose          = TRUE,
+                                     out_dir          = NULL,
+                                     run_name         = NULL,
+                                     save_obj         = FALSE) {
 
   stopifnot(inherits(seurat_obj, "Seurat"))
+
+  ## ── Resolve run directory ─────────────────────────────────────────────────
+  rd <- .resolve_run_dir(out_dir, run_name, seurat_obj@misc, verbose)
 
   ## ── Extract scGAS matrix ─────────────────────────────────────────────────
   if (!"scGAS" %in% names(seurat_obj@assays))
@@ -274,7 +286,7 @@ scgas_chromatin_potential <- function(seurat_obj,
   cell_metadata <- seurat_obj@meta.data[all_cells, , drop = FALSE]
 
   ## ── Construct and return cpf object ─────────────────────────────────────
-  structure(
+  result <- structure(
     list(
       cpf_df        = cpf_df,
       plot          = p,
@@ -293,6 +305,15 @@ scgas_chromatin_potential <- function(seurat_obj,
     ),
     class = "cpf"
   )
+
+  if (save_obj && rd$use_cache) {
+    dir.create(rd$run_dir, recursive = TRUE, showWarnings = FALSE)
+    cpf_path <- file.path(rd$run_dir, "cpf.rds")
+    if (verbose) message("[scGAS] Saving CPF object to ", cpf_path)
+    saveRDS(result, cpf_path)
+  }
+
+  result
 }
 
 

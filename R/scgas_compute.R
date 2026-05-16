@@ -38,6 +38,15 @@
 #' @param n_neighbors \code{n.neighbors} for UMAP.  Default \code{30}.
 #' @param n_cores Cores for \code{parallel::mclapply}.  Default \code{1}.
 #' @param verbose Logical.  Default \code{TRUE}.
+#' @param out_dir Base output directory.  \code{NULL} (default) inherits from
+#'   \code{seurat_obj@@misc$out_dir}.  Pass an explicit path to override.
+#' @param run_name Run label.  \code{NULL} (default) inherits from
+#'   \code{seurat_obj@@misc$run_name}.  Pass an explicit string to override.
+#'   The computed scGAS matrix is cached as
+#'   \code{out_dir/run_name/scgas_mat.rds}; re-running with the same values
+#'   loads the cached matrix and skips the computation.
+#' @param save_obj Logical.  Save the returned \code{SeuratObject} to
+#'   \code{out_dir/run_name/seurat_scgas_computed.rds}.  Default \code{FALSE}.
 #'
 #' @return The input \code{SeuratObject} with:
 #'   \describe{
@@ -73,20 +82,42 @@
 #'   ScaleData RunPCA RunUMAP VariableFeatures
 #' @export
 scgas_compute <- function(seurat_obj,
-                          lsi_dims         = 2:30,
-                          knn_k            = 30L,
-                          n_metacell_refs  = 3L,
-                          seed_fraction    = 0.10,
-                          gamma            = 0.05,
-                          outlier_quantile = 0.95,
-                          chunk_size       = 500L,
+                          lsi_dims          = 2:30,
+                          knn_k             = 30L,
+                          n_metacell_refs   = 3L,
+                          seed_fraction     = 0.10,
+                          gamma             = 0.05,
+                          outlier_quantile  = 0.95,
+                          chunk_size        = 500L,
                           run_dim_reduction = TRUE,
-                          n_pcs            = 30L,
-                          n_neighbors      = 30L,
-                          n_cores          = 1L,
-                          verbose          = TRUE) {
+                          n_pcs             = 30L,
+                          n_neighbors       = 30L,
+                          n_cores           = 1L,
+                          verbose           = TRUE,
+                          out_dir           = NULL,
+                          run_name          = NULL,
+                          save_obj          = FALSE) {
 
   stopifnot(inherits(seurat_obj, "Seurat"))
+
+  ## ── Resolve run directory ─────────────────────────────────────────────────
+  rd               <- .resolve_run_dir(out_dir, run_name, seurat_obj@misc, verbose)
+  scgas_cache_path <- if (rd$use_cache) file.path(rd$run_dir, "scgas_mat.rds") else NULL
+
+  if (rd$use_cache && file.exists(scgas_cache_path)) {
+    if (verbose) message("[scGAS] Loading cached scGAS matrix from ", scgas_cache_path)
+    scgas_mat <- readRDS(scgas_cache_path)
+    seurat_obj@misc$out_dir  <- rd$out_dir
+    seurat_obj@misc$run_name <- rd$run_name
+    seurat_obj <- scgas_add_assay(seurat_obj, scgas_mat,
+                                  run_dim_reduction, n_pcs, n_neighbors, verbose)
+    if (save_obj) {
+      obj_path <- file.path(rd$run_dir, "seurat_scgas_computed.rds")
+      if (verbose) message("[scGAS] Saving computed object to ", obj_path)
+      saveRDS(seurat_obj, obj_path)
+    }
+    return(seurat_obj)
+  }
 
   if (!"lsi" %in% names(seurat_obj@reductions))
     stop("[scGAS] 'lsi' reduction not found. Run scgas_preprocess() first.")
@@ -178,6 +209,12 @@ scgas_compute <- function(seurat_obj,
   if (verbose) message("[scGAS] Done: ", nrow(scgas_mat), " genes x ",
                        ncol(scgas_mat), " cells.")
 
+  if (rd$use_cache) {
+    dir.create(rd$run_dir, recursive = TRUE, showWarnings = FALSE)
+    if (verbose) message("[scGAS] Saving scGAS matrix to ", scgas_cache_path)
+    saveRDS(scgas_mat, scgas_cache_path)
+  }
+
   ## ── Embed scGAS matrix as an assay ───────────────────────────────────────
   seurat_obj <- scgas_add_assay(
     seurat_obj        = seurat_obj,
@@ -187,6 +224,15 @@ scgas_compute <- function(seurat_obj,
     n_neighbors       = n_neighbors,
     verbose           = verbose
   )
+
+  seurat_obj@misc$out_dir  <- rd$out_dir
+  seurat_obj@misc$run_name <- rd$run_name
+
+  if (save_obj && rd$use_cache) {
+    obj_path <- file.path(rd$run_dir, "seurat_scgas_computed.rds")
+    if (verbose) message("[scGAS] Saving computed object to ", obj_path)
+    saveRDS(seurat_obj, obj_path)
+  }
 
   return(seurat_obj)
 }
