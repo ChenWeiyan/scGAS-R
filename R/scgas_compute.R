@@ -172,18 +172,23 @@ scgas_compute <- function(seurat_obj,
   ## Pre-extract GAS vectors to avoid passing full glmnet objects to workers
   gas_mc_list <- lapply(trained_models, function(m) m$GAS)
 
-  if (verbose) message("[scGAS] Computing scGAS for ", length(sel_genes), " genes")
   n_genes     <- length(sel_genes)
   n_chunks    <- max(1L, round(n_genes / chunk_size))
   gene_chunks <- split(seq_len(n_genes),
                        sample(factor(seq_len(n_genes) %% n_chunks)))
 
-  scgas_mat <- matrix(
+  if (verbose)
+    message("[scGAS] Computing scGAS for ", n_genes, " genes in ",
+            n_chunks, " chunks (", n_cores, " core",
+            if (n_cores > 1) "s" else "", ")")
+
+  scgas_mat  <- matrix(
     NA_real_,
     nrow     = n_genes,
     ncol     = length(cell_names),
     dimnames = list(sel_genes, cell_names)
   )
+  genes_done <- 0L
 
   for (chunk_i in seq_len(n_chunks)) {
     chunk_genes <- sel_genes[gene_chunks[[chunk_i]]]
@@ -206,10 +211,16 @@ scgas_compute <- function(seurat_obj,
       if (!is.null(chunk_res[[g]])) scgas_mat[g, ] <- chunk_res[[g]]
     }
     rm(chunk_res); gc()
+
+    genes_done <- genes_done + length(chunk_genes)
+    if (verbose) .scgas_progress(genes_done, n_genes)
   }
 
-  if (verbose) message("[scGAS] Done: ", nrow(scgas_mat), " genes x ",
-                       ncol(scgas_mat), " cells.")
+  if (verbose) {
+    cat("\n", file = stderr())
+    message("[scGAS] Done: ", nrow(scgas_mat), " genes x ",
+            ncol(scgas_mat), " cells.")
+  }
 
   if (rd$use_cache) {
     dir.create(rd$run_dir, recursive = TRUE, showWarnings = FALSE)
@@ -308,6 +319,15 @@ scgas_add_assay <- function(seurat_obj,
 ## ─────────────────────────────────────────────────────────────────────────────
 ## Internal helpers
 ## ─────────────────────────────────────────────────────────────────────────────
+
+.scgas_progress <- function(done, total, width = 30L) {
+  pct    <- done / total
+  filled <- round(width * pct)
+  bar    <- paste0(strrep("=", filled), strrep(" ", width - filled))
+  cat(sprintf("\r[scGAS] [%s] %d/%d genes (%.0f%%)",
+              bar, done, total, 100 * pct),
+      file = stderr())
+}
 
 .cross_dist <- function(A, B) {
   sq_a <- rowSums(A^2)
