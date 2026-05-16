@@ -74,6 +74,7 @@
 #'             reduction = "scgasumap", ncol = 3)
 #' }
 #'
+#' @importFrom Matrix sparseMatrix
 #' @importFrom MatrixGenerics colMeans2
 #' @importFrom parallel mclapply
 #' @importFrom SCAVENGE getmutualknn randomWalk_sparse capOutlierQuantile
@@ -139,9 +140,9 @@ scgas_compute <- function(seurat_obj,
   cl_labels      <- seurat_obj$mc_membership
   cl_levels      <- attr(trained_models, "cl_levels")
   sel_genes      <- names(trained_models)
+  cell_names     <- colnames(seurat_obj)
 
   embeddings <- seurat_obj@reductions$lsi@cell.embeddings[, lsi_dims, drop = FALSE]
-  n_cells    <- nrow(embeddings)
 
   if (verbose) message("[scGAS] Building mutual-KNN graph (k = ", knn_k, ")")
   mutualknn <- SCAVENGE::getmutualknn(embeddings, knn_k)
@@ -159,51 +160,52 @@ scgas_compute <- function(seurat_obj,
   alpha_vec <- apply(dist_to_centroids, 1, function(x) sort(x, partial = k_band)[k_band])
   names(alpha_vec) <- rownames(embeddings)
 
-  other_cells <- base::setdiff(rownames(embeddings), centroid_cells)
-  cells_ref   <- .build_cell_refs(other_cells, centroid_cells,
-                                  dist_to_centroids, alpha_vec, n_metacell_refs)
+  centroid_names <- unname(centroid_cells)
+  centroid_idx   <- match(centroid_names, cell_names)
+  other_cells    <- base::setdiff(cell_names, centroid_names)
+  other_idx      <- match(other_cells, cell_names)
+
+  W_init <- .build_weight_matrix(other_cells, centroid_names,
+                                 dist_to_centroids, alpha_vec, n_metacell_refs)
+  rm(dist_to_centroids); gc()
+
+  ## Pre-extract GAS vectors to avoid passing full glmnet objects to workers
+  gas_mc_list <- lapply(trained_models, function(m) m$GAS)
 
   if (verbose) message("[scGAS] Computing scGAS for ", length(sel_genes), " genes")
-  n_genes   <- length(sel_genes)
-  n_chunks  <- max(1L, round(n_genes / chunk_size))
+  n_genes     <- length(sel_genes)
+  n_chunks    <- max(1L, round(n_genes / chunk_size))
   gene_chunks <- split(seq_len(n_genes),
                        sample(factor(seq_len(n_genes) %% n_chunks)))
 
-  results <- vector("list", n_chunks)
+  scgas_mat <- matrix(
+    NA_real_,
+    nrow     = n_genes,
+    ncol     = length(cell_names),
+    dimnames = list(sel_genes, cell_names)
+  )
+
   for (chunk_i in seq_len(n_chunks)) {
     chunk_genes <- sel_genes[gene_chunks[[chunk_i]]]
     chunk_res   <- parallel::mclapply(
       X                = as.list(chunk_genes),
       FUN              = .compute_one_gene,
-      trained_models   = trained_models,
-      centroid_cells   = centroid_cells,
-      other_cells      = other_cells,
-      cells_ref        = cells_ref,
-      n_cells          = n_cells,
-      cell_names       = colnames(seurat_obj),
+      gas_mc_list      = gas_mc_list,
+      W_init           = W_init,
+      centroid_idx     = centroid_idx,
+      other_idx        = other_idx,
+      cell_names       = cell_names,
       mutualknn        = mutualknn,
       seed_fraction    = seed_fraction,
       gamma            = gamma,
       outlier_quantile = outlier_quantile,
       mc.cores         = n_cores
     )
-    names(chunk_res)   <- chunk_genes
-    results[[chunk_i]] <- chunk_res
-    gc()
-  }
-
-  if (verbose) message("[scGAS] Assembling result matrix")
-  scgas_mat <- matrix(
-    NA_real_,
-    nrow     = n_genes,
-    ncol     = ncol(seurat_obj),
-    dimnames = list(sel_genes, colnames(seurat_obj))
-  )
-  for (chunk_i in seq_len(n_chunks)) {
-    for (g in names(results[[chunk_i]])) {
-      res_g <- results[[chunk_i]][[g]]
-      if (!is.null(res_g)) scgas_mat[g, ] <- res_g$scGAS
+    names(chunk_res) <- chunk_genes
+    for (g in chunk_genes) {
+      if (!is.null(chunk_res[[g]])) scgas_mat[g, ] <- chunk_res[[g]]
     }
+    rm(chunk_res); gc()
   }
 
   if (verbose) message("[scGAS] Done: ", nrow(scgas_mat), " genes x ",
@@ -327,56 +329,64 @@ scgas_add_assay <- function(seurat_obj,
   return(centroids)
 }
 
-.build_cell_refs <- function(other_cells, centroid_cells,
-                             dist_to_centroids, alpha_vec, n_metacell_refs) {
-  refs <- vector("list", length(other_cells))
-  names(refs) <- other_cells
-  for (cell in other_cells) {
+## Builds a sparse n_other x n_centroids weight matrix.
+## Row i holds the normalised Gaussian weights for other_cells[i] over its
+## top n_ref nearest Metacell centroids.  Replaces the per-cell list built by
+## .build_cell_refs, allowing vectorised W_init %*% gas_mc in workers.
+.build_weight_matrix <- function(other_cells, centroid_names,
+                                 dist_to_centroids, alpha_vec, n_metacell_refs) {
+  n_other <- length(other_cells)
+  n_ref   <- min(n_metacell_refs, length(centroid_names))
+  ri <- integer(n_other * n_ref)
+  ci <- integer(n_other * n_ref)
+  xv <- numeric(n_other * n_ref)
+
+  for (i in seq_along(other_cells)) {
+    cell      <- other_cells[i]
     alpha     <- alpha_vec[cell]
-    raw_dists <- dist_to_centroids[cell, centroid_cells]
-    weights   <- exp(-(raw_dists / alpha)^2)
-    weights   <- weights / sum(weights)
-    top_idx   <- order(weights, decreasing = TRUE)[seq_len(min(n_metacell_refs, length(weights)))]
-    top_wgt   <- weights[top_idx]
-    refs[[cell]] <- top_wgt / sum(top_wgt)
+    raw_dists <- dist_to_centroids[cell, centroid_names]
+    wgt       <- exp(-(raw_dists / alpha)^2)
+    wgt       <- wgt / sum(wgt)
+    top_j     <- order(wgt, decreasing = TRUE)[seq_len(n_ref)]
+    wgt_top   <- wgt[top_j]
+    wgt_top   <- wgt_top / sum(wgt_top)
+    idx       <- seq.int((i - 1L) * n_ref + 1L, length.out = n_ref)
+    ri[idx]   <- i
+    ci[idx]   <- top_j
+    xv[idx]   <- wgt_top
   }
-  return(refs)
+
+  Matrix::sparseMatrix(
+    i        = ri, j = ci, x = xv,
+    dims     = c(n_other, length(centroid_names)),
+    dimnames = list(other_cells, centroid_names)
+  )
 }
 
 .compute_one_gene <- function(gene_name,
-                              trained_models,
-                              centroid_cells,
-                              other_cells,
-                              cells_ref,
-                              n_cells,
+                              gas_mc_list,
+                              W_init,
+                              centroid_idx,
+                              other_idx,
                               cell_names,
                               mutualknn,
                               seed_fraction,
                               gamma,
                               outlier_quantile) {
   tryCatch({
-    model_g <- trained_models[[gene_name]]
-    gas_mc  <- model_g$GAS
-    names(gas_mc) <- unname(centroid_cells)
+    gas_mc <- gas_mc_list[[gene_name]]
 
-    scgas0 <- stats::setNames(numeric(length(cell_names)), cell_names)
-    scgas0[unname(centroid_cells)] <- gas_mc
-
-    for (cell in other_cells) {
-      ref_wgt      <- cells_ref[[cell]]
-      scgas0[cell] <- sum(ref_wgt * gas_mc[names(ref_wgt)])
-    }
+    scgas0 <- numeric(length(cell_names))
+    scgas0[centroid_idx] <- gas_mc
+    scgas0[other_idx]    <- as.numeric(W_init %*% gas_mc)
 
     seed_n   <- max(1L, floor(seed_fraction * length(scgas0)))
-    seed_idx <- rownames(mutualknn)[order(scgas0, decreasing = TRUE)[seq_len(seed_n)]]
-    np_score <- SCAVENGE::randomWalk_sparse(intM = mutualknn,
-                                            queryCells = seed_idx,
-                                            gamma = gamma)
-    np_score2 <- SCAVENGE::capOutlierQuantile(np_score, outlier_quantile)
-    scgas     <- as.numeric(SCAVENGE::max_min_scale(np_score2))
-    names(scgas) <- rownames(mutualknn)
-    scgas <- scgas[cell_names]
+    seed_idx <- cell_names[order(scgas0, decreasing = TRUE)[seq_len(seed_n)]]
 
-    list(scGAS0 = scgas0, scGAS = scgas)
+    np_score  <- SCAVENGE::randomWalk_sparse(intM = mutualknn,
+                                             queryCells = seed_idx,
+                                             gamma = gamma)
+    np_score2 <- SCAVENGE::capOutlierQuantile(np_score, outlier_quantile)
+    as.numeric(SCAVENGE::max_min_scale(np_score2))
   }, error = function(e) NULL)
 }
