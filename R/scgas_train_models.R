@@ -38,6 +38,15 @@
 #' @param deviance_quantile Lambda selection threshold.  Default \code{0.95}.
 #' @param n_cores Cores for \code{parallel::mclapply}.  Default \code{1}.
 #' @param verbose Logical.  Default \code{TRUE}.
+#' @param out_dir Path to a base output directory.  All intermediate objects
+#'   and per-gene models are written under \code{out_dir/run_name/}.  Set to
+#'   \code{NULL} (default) to disable disk caching entirely.
+#' @param run_name Character string identifying this run.  Creates the
+#'   subdirectory \code{out_dir/run_name/} that holds all intermediate files
+#'   and a \code{models/} subfolder with one \code{.rds} per gene.  When the
+#'   function is re-run with the same \code{out_dir}/\code{run_name}, cached
+#'   intermediates are loaded from disk and already-trained gene models are
+#'   skipped.  Default \code{"scgas_run"}.
 #'
 #' @return The input \code{SeuratObject} with fitted models stored in
 #'   \code{seurat_obj@@misc$scgas_models}.  Each element is named by gene and
@@ -49,6 +58,10 @@
 #' ## Simplest call — reference files loaded automatically
 #' obj <- scgas_train_models(obj, n_cores = 8)
 #'
+#' ## With checkpointing — safe to interrupt and re-run
+#' obj <- scgas_train_models(obj, n_cores = 8,
+#'                           out_dir = "results", run_name = "pbmc_run1")
+#'
 #' ## Override one reference explicitly
 #' obj <- scgas_train_models(obj, sig_associations = my_sig_ass, n_cores = 8)
 #'
@@ -58,8 +71,7 @@
 #' @importFrom rtracklayer import
 #' @importFrom GenomicRanges findOverlaps sort seqnames start end
 #' @importFrom S4Vectors queryHits
-#' @importFrom Matrix rowSums
-#' @importFrom MatrixGenerics rowSums2
+#' @importFrom Matrix sparse.model.matrix colSums
 #' @importFrom parallel mclapply
 #' @importFrom glmnetUtils glmnet
 #' @importFrom stats predict median
@@ -74,7 +86,9 @@ scgas_train_models <- function(seurat_obj,
                                lasso_alpha          = 1,
                                deviance_quantile    = 0.95,
                                n_cores              = 1L,
-                               verbose              = TRUE) {
+                               verbose              = TRUE,
+                               out_dir              = NULL,
+                               run_name             = "scgas_run") {
 
   stopifnot(
     inherits(seurat_obj, "Seurat"),
@@ -82,6 +96,15 @@ scgas_train_models <- function(seurat_obj,
     is.numeric(lasso_alpha), lasso_alpha >= 0, lasso_alpha <= 1,
     is.numeric(deviance_quantile), deviance_quantile > 0, deviance_quantile <= 1
   )
+
+  ## ── Set up run directory ──────────────────────────────────────────────────
+  use_cache  <- !is.null(out_dir)
+  run_dir    <- if (use_cache) file.path(out_dir, run_name) else NULL
+  models_dir <- if (use_cache) file.path(run_dir, "models") else NULL
+  if (use_cache) {
+    dir.create(models_dir, recursive = TRUE, showWarnings = FALSE)
+    if (verbose) message("[scGAS] Run directory: ", run_dir)
+  }
 
   ## ── Auto-load reference files if not supplied ─────────────────────────────
   genome_version <- seurat_obj@misc$genome_version
@@ -114,74 +137,147 @@ scgas_train_models <- function(seurat_obj,
          "Run scgas_metacell() first.")
   }
 
-  if (verbose) message("[scGAS] Matching cCRE names to dataset features")
-  ref_cre_gr <- .load_ref_cre(seurat_obj, cre_bed_path, verbose)
+  ## ── Metacell ATAC matrix (cached) ────────────────────────────────────────
+  atac_cache_path <- if (use_cache) file.path(run_dir, "atac_cl_lognorm.rds") else NULL
 
-  obj_ranges <- seurat_obj@assays$ATAC@ranges
-  ov <- GenomicRanges::findOverlaps(ref_cre_gr, obj_ranges)
-  obj_ranges$name <- ref_cre_gr[S4Vectors::queryHits(ov)]$name
-  names(obj_ranges) <- obj_ranges$name
+  if (use_cache && file.exists(atac_cache_path)) {
+    if (verbose) message("[scGAS] Loading cached metacell ATAC matrix")
+    atac_cl_lognorm <- readRDS(atac_cache_path)
+    cl_levels       <- colnames(atac_cl_lognorm)
+    cl_levels       <- sub("^Cluster-", "", cl_levels)
+  } else {
+    if (verbose) message("[scGAS] Matching cCRE names to dataset features")
+    ref_cre_gr <- .load_ref_cre(seurat_obj, cre_bed_path, verbose)
 
-  all_ass_cre  <- unique(unlist(lapply(sig_associations, function(x) x$Sig.df$CRE.sig)))
-  all_ass_gr   <- GenomicRanges::sort(obj_ranges[which(obj_ranges$name %in% all_ass_cre)])
-  all_ass_names <- paste(
-    as.character(GenomicRanges::seqnames(all_ass_gr)),
-    GenomicRanges::start(all_ass_gr),
-    GenomicRanges::end(all_ass_gr),
-    sep = "-"
-  )
+    obj_ranges <- seurat_obj@assays$ATAC@ranges
+    ov <- GenomicRanges::findOverlaps(ref_cre_gr, obj_ranges)
+    obj_ranges$name <- ref_cre_gr[S4Vectors::queryHits(ov)]$name
+    names(obj_ranges) <- obj_ranges$name
 
-  if (verbose) message("[scGAS] Aggregating counts into Metacells")
-  cl_levels <- levels(as.factor(cl_labels))
+    all_ass_cre   <- unique(unlist(lapply(sig_associations, function(x) x$Sig.df$CRE.sig)))
+    all_ass_gr    <- GenomicRanges::sort(obj_ranges[which(obj_ranges$name %in% all_ass_cre)])
+    all_ass_names <- paste(
+      as.character(GenomicRanges::seqnames(all_ass_gr)),
+      GenomicRanges::start(all_ass_gr),
+      GenomicRanges::end(all_ass_gr),
+      sep = "-"
+    )
 
-  count_mat  <- seurat_obj@assays$ATAC@counts
-  feat_inter <- intersect(rownames(count_mat), all_ass_names)
-  count_mat  <- count_mat[feat_inter, , drop = FALSE]
+    if (verbose) message("[scGAS] Aggregating counts into Metacells")
+    cl_levels  <- levels(as.factor(cl_labels))
+    count_mat  <- seurat_obj@assays$ATAC@counts
+    feat_inter <- intersect(rownames(count_mat), all_ass_names)
+    count_mat  <- count_mat[feat_inter, , drop = FALSE]
 
-  atac_cl_mat <- matrix(
-    0L,
-    nrow = length(feat_inter),
-    ncol = length(cl_levels),
-    dimnames = list(feat_inter, paste0("Cluster-", cl_levels))
-  )
-  for (cl in cl_levels) {
-    sel <- which(cl_labels == cl)
-    atac_cl_mat[, paste0("Cluster-", cl)] <-
-      MatrixGenerics::rowSums2(count_mat[, sel, drop = FALSE])
+    ## Vectorised aggregation: one sparse matrix multiply instead of a per-cluster loop
+    cl_factor   <- factor(cl_labels, levels = cl_levels)
+    design      <- Matrix::sparse.model.matrix(~ 0 + cl_factor)
+    colnames(design) <- paste0("Cluster-", cl_levels)
+    atac_cl_mat <- count_mat %*% design
+
+    sf <- floor(as.numeric(encode_lib_size) * length(feat_inter) / nrow(encode_dnase_lognorm))
+    if (verbose) message("[scGAS] Library-size scaling factor: ", sf)
+    col_sums        <- Matrix::colSums(atac_cl_mat)
+    atac_cl_lognorm <- log2(t(t(atac_cl_mat) / col_sums) * sf + 1)
+
+    name_map <- stats::setNames(all_ass_gr$name, all_ass_names)
+    rownames(atac_cl_lognorm) <- name_map[rownames(atac_cl_lognorm)]
+
+    if (use_cache) {
+      if (verbose) message("[scGAS] Saving metacell ATAC matrix to ", atac_cache_path)
+      saveRDS(atac_cl_lognorm, atac_cache_path)
+    }
   }
 
-  sf <- floor(as.numeric(encode_lib_size) * length(feat_inter) / nrow(encode_dnase_lognorm))
-  if (verbose) message("[scGAS] Library-size scaling factor: ", sf)
-  atac_cl_lognorm <- log2(t(t(atac_cl_mat) / colSums(atac_cl_mat)) * sf + 1)
+  ## ── Pre-filter gene–CRE associations (cached) ────────────────────────────
+  ## Intersect each gene's CREs against the dataset CREs once here and cache.
+  ## .train_one_gene then uses the pre-filtered list directly (no re-intersect).
+  cre_cache_path <- if (use_cache) file.path(run_dir, "gene_cres.rds") else NULL
+  all_cre_names  <- rownames(atac_cl_lognorm)
 
-  name_map <- stats::setNames(all_ass_gr$name, all_ass_names)
-  rownames(atac_cl_lognorm) <- name_map[rownames(atac_cl_lognorm)]
+  if (use_cache && file.exists(cre_cache_path)) {
+    if (verbose) message("[scGAS] Loading cached gene–CRE associations")
+    cache        <- readRDS(cre_cache_path)
+    gene_cres_list <- cache$gene_cres_list
+    sel_genes      <- cache$sel_genes
+    thr            <- cache$thr
+  } else {
+    if (verbose) message("[scGAS] Filtering gene–CRE associations")
+    gene_cres_list <- lapply(sig_associations, function(x) {
+      intersect(all_cre_names, x$Sig.df$CRE.sig)
+    })
+    ass_counts <- lengths(gene_cres_list)
+    thr        <- if (is.null(min_associations)) stats::median(ass_counts) else as.integer(min_associations)
+    sel_genes  <- names(which(ass_counts > thr))
 
-  ass_counts <- vapply(sig_associations, function(x) {
-    length(intersect(all_ass_gr$name, x$Sig.df$CRE.sig))
-  }, integer(1L))
-  thr       <- if (is.null(min_associations)) stats::median(ass_counts) else as.integer(min_associations)
-  sel_genes <- names(which(ass_counts > thr))
+    if (length(sel_genes) == 0)
+      stop("[scGAS] No genes passed the association threshold (", thr,
+           "). Try lowering min_associations.")
 
-  if (length(sel_genes) == 0)
-    stop("[scGAS] No genes passed the association threshold (", thr,
-         "). Try lowering min_associations.")
-  if (verbose) message("[scGAS] Training models for ", length(sel_genes),
-                       " genes (threshold = ", thr, " associations)")
+    gene_cres_list <- gene_cres_list[sel_genes]
 
-  trained_models <- parallel::mclapply(
-    X                    = as.list(sel_genes),
-    FUN                  = .train_one_gene,
-    sig_associations     = sig_associations,
-    all_ass_gr           = all_ass_gr,
-    encode_rna_lognorm   = encode_rna_lognorm,
-    encode_dnase_lognorm = encode_dnase_lognorm,
-    atac_cl_lognorm      = atac_cl_lognorm,
-    lasso_alpha          = lasso_alpha,
-    deviance_quantile    = deviance_quantile,
-    mc.cores             = n_cores
-  )
-  names(trained_models) <- sel_genes
+    if (use_cache) {
+      if (verbose) message("[scGAS] Saving gene–CRE associations to ", cre_cache_path)
+      saveRDS(list(gene_cres_list = gene_cres_list, sel_genes = sel_genes, thr = thr),
+              cre_cache_path)
+    }
+  }
+
+  ## ── Train per-gene Lasso models with checkpointing ───────────────────────
+  already_done  <- if (use_cache)
+    file.exists(file.path(models_dir, paste0(sel_genes, ".rds")))
+  else
+    rep(FALSE, length(sel_genes))
+
+  n_done  <- sum(already_done)
+  n_total <- length(sel_genes)
+
+  if (n_done > 0 && verbose)
+    message("[scGAS] Resuming: ", n_done, "/", n_total,
+            " gene models already on disk, training remaining ", n_total - n_done)
+  else if (verbose)
+    message("[scGAS] Training models for ", n_total,
+            " genes (threshold = ", thr, " associations)")
+
+  genes_to_train <- sel_genes[!already_done]
+
+  if (length(genes_to_train) > 0) {
+    parallel::mclapply(
+      X                    = as.list(genes_to_train),
+      FUN                  = .train_one_gene,
+      gene_cres_list       = gene_cres_list,
+      encode_rna_lognorm   = encode_rna_lognorm,
+      encode_dnase_lognorm = encode_dnase_lognorm,
+      atac_cl_lognorm      = atac_cl_lognorm,
+      lasso_alpha          = lasso_alpha,
+      deviance_quantile    = deviance_quantile,
+      models_dir           = models_dir,
+      mc.cores             = n_cores
+    )
+  }
+
+  ## ── Collect all models (disk + in-memory fallback) ───────────────────────
+  if (use_cache) {
+    trained_models <- lapply(sel_genes, function(g) {
+      path <- file.path(models_dir, paste0(g, ".rds"))
+      if (file.exists(path)) readRDS(path) else NULL
+    })
+    names(trained_models) <- sel_genes
+  } else {
+    trained_models <- parallel::mclapply(
+      X                    = as.list(sel_genes),
+      FUN                  = .train_one_gene,
+      gene_cres_list       = gene_cres_list,
+      encode_rna_lognorm   = encode_rna_lognorm,
+      encode_dnase_lognorm = encode_dnase_lognorm,
+      atac_cl_lognorm      = atac_cl_lognorm,
+      lasso_alpha          = lasso_alpha,
+      deviance_quantile    = deviance_quantile,
+      models_dir           = NULL,
+      mc.cores             = n_cores
+    )
+    names(trained_models) <- sel_genes
+  }
 
   failed <- vapply(trained_models, is.null, logical(1L))
   if (any(failed)) {
@@ -192,12 +288,11 @@ scgas_train_models <- function(seurat_obj,
 
   attr(trained_models, "ATAC_CL_lognorm") <- atac_cl_lognorm
   attr(trained_models, "cl_levels")       <- cl_levels
-  attr(trained_models, "all_ass_gr")      <- all_ass_gr
 
   if (verbose) message("[scGAS] Model training complete: ",
                        length(trained_models), " genes.")
 
-  ## ── Store in SeuratObject and return ────────────────────────────────────
+  ## ── Store in SeuratObject and return ─────────────────────────────────────
   seurat_obj@misc$scgas_models <- trained_models
   return(seurat_obj)
 }
@@ -246,16 +341,15 @@ scgas_train_models <- function(seurat_obj,
 
 
 .train_one_gene <- function(gene_name,
-                            sig_associations,
-                            all_ass_gr,
+                            gene_cres_list,
                             encode_rna_lognorm,
                             encode_dnase_lognorm,
                             atac_cl_lognorm,
                             lasso_alpha,
-                            deviance_quantile) {
+                            deviance_quantile,
+                            models_dir = NULL) {
   tryCatch({
-    gene_cres <- sig_associations[[gene_name]]$Sig.df$CRE.sig
-    cre_v     <- intersect(all_ass_gr$name, gene_cres)
+    cre_v <- gene_cres_list[[gene_name]]
     if (length(cre_v) == 0) return(NULL)
 
     train_df <- data.frame(
@@ -279,7 +373,12 @@ scgas_train_models <- function(seurat_obj,
                                      s = lambda_choose))
     gas  <- gas - min(gas)
 
-    list(glmnetfit = fit, lambda_choose = lambda_choose,
-         GAS = gas, cCRE_used = cre_v)
+    result <- list(glmnetfit = fit, lambda_choose = lambda_choose,
+                   GAS = gas, cCRE_used = cre_v)
+
+    if (!is.null(models_dir))
+      saveRDS(result, file.path(models_dir, paste0(gene_name, ".rds")))
+
+    result
   }, error = function(e) NULL)
 }
