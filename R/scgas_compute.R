@@ -30,13 +30,16 @@
 #' @param gamma Random-walk restart probability.  Default \code{0.05}.
 #' @param outlier_quantile Upper quantile for outlier capping before scaling.
 #'   Default \code{0.95}.
-#' @param chunk_size Number of genes processed per parallel batch.  Default
-#'   \code{500}.
+#' @param chunk_size Number of genes per memory batch.  All genes in a batch
+#'   are scored simultaneously via batched sparse matrix algebra; larger values
+#'   are faster but use more RAM.  Default \code{500}.
 #' @param run_dim_reduction Logical.  Run PCA and UMAP on the scGAS assay.
 #'   Default \code{TRUE}.
 #' @param n_pcs Number of PCs for PCA.  Default \code{30}.
 #' @param n_neighbors \code{n.neighbors} for UMAP.  Default \code{30}.
-#' @param n_cores Cores for \code{parallel::mclapply}.  Default \code{1}.
+#' @param n_cores Kept for backward compatibility.  Parallelism is provided by
+#'   the BLAS/OpenMP threads of the linked matrix library (set
+#'   \code{OMP_NUM_THREADS} before starting R).  Default \code{1}.
 #' @param verbose Logical.  Default \code{TRUE}.
 #' @param out_dir Base output directory.  \code{NULL} (default) inherits from
 #'   \code{seurat_obj@@misc$out_dir}.  Pass an explicit path to override.
@@ -76,9 +79,7 @@
 #'
 #' @importFrom Matrix sparseMatrix
 #' @importFrom MatrixGenerics colMeans2
-#' @importFrom parallel mclapply
-#' @importFrom SCAVENGE getmutualknn randomWalk_sparse capOutlierQuantile
-#'   max_min_scale
+#' @importFrom SCAVENGE getmutualknn
 #' @importFrom Seurat CreateAssayObject DefaultAssay FindVariableFeatures
 #'   ScaleData RunPCA RunUMAP VariableFeatures
 #' @export
@@ -169,18 +170,20 @@ scgas_compute <- function(seurat_obj,
                                  dist_to_centroids, alpha_vec, n_metacell_refs)
   rm(dist_to_centroids); gc()
 
-  ## Pre-extract GAS vectors to avoid passing full glmnet objects to workers
-  gas_mc_list <- lapply(trained_models, function(m) m$GAS)
+  ## Stack all per-gene metacell GAS vectors into one matrix (n_centroids × n_genes)
+  gas_mc_mat <- do.call(cbind, lapply(trained_models, function(m) m$GAS))
+  colnames(gas_mc_mat) <- sel_genes
 
   n_genes     <- length(sel_genes)
+  n_seed      <- max(1L, floor(seed_fraction * length(cell_names)))
   n_chunks    <- max(1L, round(n_genes / chunk_size))
   gene_chunks <- split(seq_len(n_genes),
                        sample(factor(seq_len(n_genes) %% n_chunks)))
 
   if (verbose)
     message("[scGAS] Computing scGAS for ", n_genes, " genes in ",
-            n_chunks, " chunks (", n_cores, " core",
-            if (n_cores > 1) "s" else "", ")")
+            n_chunks, " batch", if (n_chunks > 1) "es" else "",
+            " of ~", chunk_size, " genes (batched sparse algebra)")
 
   scgas_mat  <- matrix(
     NA_real_,
@@ -191,28 +194,43 @@ scgas_compute <- function(seurat_obj,
   genes_done <- 0L
 
   for (chunk_i in seq_len(n_chunks)) {
-    chunk_genes <- sel_genes[gene_chunks[[chunk_i]]]
-    chunk_res   <- parallel::mclapply(
-      X                = as.list(chunk_genes),
-      FUN              = .compute_one_gene,
-      gas_mc_list      = gas_mc_list,
-      W_init           = W_init,
-      centroid_idx     = centroid_idx,
-      other_idx        = other_idx,
-      cell_names       = cell_names,
-      mutualknn        = mutualknn,
-      seed_fraction    = seed_fraction,
-      gamma            = gamma,
-      outlier_quantile = outlier_quantile,
-      mc.cores         = n_cores
-    )
-    names(chunk_res) <- chunk_genes
-    for (g in chunk_genes) {
-      if (!is.null(chunk_res[[g]])) scgas_mat[g, ] <- chunk_res[[g]]
-    }
-    rm(chunk_res); gc()
+    chunk_idx   <- gene_chunks[[chunk_i]]
+    chunk_genes <- sel_genes[chunk_idx]
+    nc          <- length(chunk_genes)
 
-    genes_done <- genes_done + length(chunk_genes)
+    ## ── scgas0: metacell GAS → single-cell initialisation ──────────────────
+    gmc <- gas_mc_mat[, chunk_idx, drop = FALSE]            # n_centroids × nc
+    s0  <- matrix(0, length(cell_names), nc,
+                  dimnames = list(cell_names, chunk_genes))
+    s0[centroid_idx, ] <- gmc
+    s0[other_idx,    ] <- as.matrix(W_init %*% gmc)        # single matmul
+
+    ## ── Seed matrix P0: top seed_fraction cells per gene ───────────────────
+    ## find the n_seed-th largest value in each column as the threshold
+    thresh  <- apply(s0, 2,
+                     function(x) sort(x, partial = n_seed, decreasing = TRUE)[n_seed])
+    seed_mx <- sweep(s0, 2, thresh, ">=")                   # logical n_cells × nc
+    col_n   <- pmax(1L, colSums(seed_mx))
+    P0      <- sweep(seed_mx * 1.0, 2, col_n, "/")         # uniform seed weights
+
+    ## ── Batched random walk ─────────────────────────────────────────────────
+    ## Replaces nc individual SCAVENGE::randomWalk_sparse calls with one
+    ## sparse × dense matrix iteration: mutualknn %*% P  (BLAS3)
+    P <- .batched_rw(mutualknn, P0, gamma)
+    rm(gmc, s0, seed_mx, P0); gc()
+
+    ## ── Outlier cap + min-max scale per gene (column of P) ─────────────────
+    caps <- apply(P, 2, quantile, probs = outlier_quantile, names = FALSE)
+    for (j in seq_len(nc)) P[, j] <- pmin(P[, j], caps[j])
+    mins <- apply(P, 2, min,      na.rm = TRUE)
+    maxs <- apply(P, 2, max,      na.rm = TRUE)
+    rng  <- pmax(maxs - mins, .Machine$double.eps)
+    P_sc <- sweep(sweep(P, 2, mins, "-"), 2, rng, "/")
+
+    scgas_mat[chunk_genes, ] <- t(P_sc)
+    rm(P, P_sc); gc()
+
+    genes_done <- genes_done + nc
     if (verbose) .scgas_progress(genes_done, n_genes)
   }
 
@@ -389,30 +407,18 @@ scgas_add_assay <- function(seurat_obj,
   )
 }
 
-.compute_one_gene <- function(gene_name,
-                              gas_mc_list,
-                              W_init,
-                              centroid_idx,
-                              other_idx,
-                              cell_names,
-                              mutualknn,
-                              seed_fraction,
-                              gamma,
-                              outlier_quantile) {
-  tryCatch({
-    gas_mc <- gas_mc_list[[gene_name]]
-
-    scgas0 <- numeric(length(cell_names))
-    scgas0[centroid_idx] <- gas_mc
-    scgas0[other_idx]    <- as.numeric(W_init %*% gas_mc)
-
-    seed_n   <- max(1L, floor(seed_fraction * length(scgas0)))
-    seed_idx <- cell_names[order(scgas0, decreasing = TRUE)[seq_len(seed_n)]]
-
-    np_score  <- SCAVENGE::randomWalk_sparse(intM = mutualknn,
-                                             queryCells = seed_idx,
-                                             gamma = gamma)
-    np_score2 <- SCAVENGE::capOutlierQuantile(np_score, outlier_quantile)
-    as.numeric(SCAVENGE::max_min_scale(np_score2))
-  }, error = function(e) NULL)
+## Batched random walk with restart.
+## M    — column-stochastic sparse transition matrix (n_cells × n_cells)
+## P0   — dense seed matrix (n_cells × n_genes), columns sum to 1
+## Returns a dense matrix of the same dimensions as P0.
+## Convergence: iterate until max element-wise change < tol, or max_iter.
+.batched_rw <- function(M, P0, gamma, max_iter = 30L, tol = 1e-6) {
+  c1 <- 1 - gamma
+  P  <- P0                                 # base::matrix throughout
+  for (i in seq_len(max_iter)) {
+    P_new <- c1 * as.matrix(M %*% P) + gamma * P0   # coerce dgeMatrix → matrix
+    if (max(abs(P_new - P)) < tol) { P <- P_new; break }
+    P <- P_new
+  }
+  P
 }
