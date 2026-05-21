@@ -302,10 +302,12 @@ scgas_add_assay <- function(seurat_obj,
       reduction.name = "scgaspca",
       verbose        = verbose
     )
+    actual_pcs <- ncol(seurat_obj@reductions$scgaspca@cell.embeddings)
+    umap_dims  <- seq_len(min(n_pcs, actual_pcs))
     seurat_obj <- Seurat::RunUMAP(
       seurat_obj,
       reduction      = "scgaspca",
-      dims           = seq_len(n_pcs),
+      dims           = umap_dims,
       n.components   = 2L,
       n.neighbors    = n_neighbors,
       reduction.name = "scgasumap",

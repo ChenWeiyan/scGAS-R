@@ -10,8 +10,9 @@
 #' \code{#} comment header of the fragment file (written by CellRanger /
 #' CellRanger-ARC) and extracts the genome assembly token (e.g.
 #' \code{GRCh38}, \code{GRCh37}).  It then maps that token to the
-#' corresponding UCSC name (\code{"hg38"}, \code{"hg19"}, \ldots) and looks
-#' for matching reference files in \code{data_dir}.
+#' corresponding UCSC name (\code{"hg38"} or \code{"hg19"}) and looks
+#' for matching reference files in \code{data_dir}.  Only human assemblies
+#' (hg19, hg38) are supported.
 #'
 #' If the genome cannot be detected, a warning is issued and \code{"hg19"} is
 #' used as the fallback.
@@ -43,9 +44,9 @@
 #'   (\code{hg19_500bp_CRE.bed}, ENCODE \code{.gz} files, etc.).  \code{NULL}
 #'   (default) searches for \code{"data"} and \code{"../data"} relative to
 #'   the current working directory.
-#' @param genome_version Genome assembly string (\code{"hg19"}, \code{"hg38"},
-#'   \code{"mm10"}, \ldots).  \code{NULL} (default) auto-detects from the
-#'   fragment file header.  Set explicitly to skip detection.
+#' @param genome_version Genome assembly string (\code{"hg19"} or \code{"hg38"}).
+#'   \code{NULL} (default) auto-detects from the fragment file header.
+#'   Set explicitly to skip detection.
 #' @param rna_matrix Optional sparse RNA count matrix (genes x cells) for
 #'   multiome data.
 #' @param meta_data Optional data frame of per-cell metadata (row names =
@@ -111,8 +112,8 @@
 #' @importFrom rtracklayer import
 #' @importFrom Signac CreateFragmentObject FeatureMatrix CreateChromatinAssay
 #'   NucleosomeSignal TSSEnrichment FindTopFeatures RunTFIDF RunSVD
-#' @importFrom Seurat CreateSeuratObject CreateAssayObject FindNeighbors
-#'   RunUMAP AddMetaData
+#' @importFrom Seurat CreateSeuratObject CreateAssayObject DefaultAssay
+#'   FindNeighbors RunUMAP AddMetaData FindVariableFeatures ScaleData RunPCA
 #' @importFrom Matrix Matrix rowSums
 #' @importFrom GenomicRanges seqnames
 #' @importFrom GenomeInfoDb seqlevels
@@ -379,15 +380,8 @@ scgas_preprocess <- function(fragment_path,
 .detect_genome_from_fragments <- function(fragment_path, verbose = TRUE) {
   ## Map of patterns (case-insensitive) found in fragment headers to UCSC names
   pattern_map <- c(
-    "GRCh38" = "hg38",  "hg38"   = "hg38",
-    "GRCh37" = "hg19",  "hg19"   = "hg19",
-    "GRCm39" = "mm39",  "mm39"   = "mm39",
-    "GRCm38" = "mm10",  "mm10"   = "mm10",
-    "GRCm37" = "mm9",   "mm9"    = "mm9",
-    "Rnor_7" = "rn7",   "rn7"    = "rn7",
-    "Rnor_6" = "rn6",   "rn6"    = "rn6",
-    "dm6"    = "dm6",
-    "ce11"   = "ce11"
+    "GRCh38" = "hg38",  "hg38" = "hg38",
+    "GRCh37" = "hg19",  "hg19" = "hg19"
   )
 
   tryCatch({
@@ -502,9 +496,7 @@ scgas_preprocess <- function(fragment_path,
 .auto_annotation <- function(genome_version, verbose = TRUE) {
   pkg_map <- c(
     hg19 = "EnsDb.Hsapiens.v75",
-    hg38 = "EnsDb.Hsapiens.v86",
-    mm10 = "EnsDb.Mmusculus.v79",
-    mm39 = "EnsDb.Mmusculus.v109"
+    hg38 = "EnsDb.Hsapiens.v86"
   )
   pkg <- pkg_map[[genome_version]]
   if (is.null(pkg)) {

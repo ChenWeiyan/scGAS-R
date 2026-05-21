@@ -127,9 +127,14 @@ scgas_train_models <- function(seurat_obj,
       "dnase_enc", genome_version, data_dir, verbose)
   }
 
+  if (is.data.frame(encode_rna_lognorm))
+    encode_rna_lognorm <- as.matrix(encode_rna_lognorm)
+  if (is.data.frame(encode_dnase_lognorm))
+    encode_dnase_lognorm <- as.matrix(encode_dnase_lognorm)
+
   stopifnot(
     is.list(sig_associations), !is.null(names(sig_associations)),
-    is.matrix(encode_rna_lognorm) || is.data.frame(encode_rna_lognorm),
+    is.matrix(encode_rna_lognorm),
     is.matrix(encode_dnase_lognorm)
   )
 
@@ -290,8 +295,7 @@ scgas_train_models <- function(seurat_obj,
     trained_models <- trained_models[!failed]
   }
 
-  attr(trained_models, "ATAC_CL_lognorm") <- atac_cl_lognorm
-  attr(trained_models, "cl_levels")       <- cl_levels
+  attr(trained_models, "cl_levels") <- cl_levels
 
   if (verbose) message("[scGAS] Model training complete: ",
                        length(trained_models), " genes.")

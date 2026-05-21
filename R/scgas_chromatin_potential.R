@@ -179,7 +179,9 @@ scgas_chromatin_potential <- function(seurat_obj,
 
   ## ── Extract RNA matrix ───────────────────────────────────────────────────
   if (!"RNA" %in% names(seurat_obj@assays))
-    stop("[scGAS] No RNA assay found in seurat_obj.")
+    stop("[scGAS] No RNA assay found. scgas_chromatin_potential() requires paired ",
+         "RNA expression (multiome data).\n",
+         "Pass an RNA count matrix via the rna_matrix argument of scgas_preprocess().")
   rna_mat <- as.matrix(seurat_obj@assays$RNA@data)
 
   ## ── Extract embedding ────────────────────────────────────────────────────

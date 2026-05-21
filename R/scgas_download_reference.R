@@ -148,7 +148,7 @@ scgas_download_reference <- function(genome      = "hg19",
 #' @keywords internal
 .format_size <- function(url) {
   tryCatch({
-    h <- curlGetHeaders(url, redirect = TRUE, verify = FALSE)
+    h <- utils::curlGetHeaders(url, redirect = TRUE, verify = FALSE)
     cl <- grep("^content-length:", h, ignore.case = TRUE, value = TRUE)
     if (length(cl) == 0) return("size unknown")
     bytes <- as.numeric(trimws(sub(".*:", "", cl[1])))
