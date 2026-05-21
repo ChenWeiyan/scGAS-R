@@ -287,8 +287,12 @@ scgas_add_assay <- function(seurat_obj,
                             verbose           = TRUE) {
   stopifnot(inherits(seurat_obj, "Seurat"), is.matrix(scgas_mat))
 
-  assay_obj      <- Seurat::CreateAssayObject(counts = scgas_mat)
-  assay_obj@data <- scgas_mat
+  assay_obj <- Seurat::CreateAssayObject(counts = scgas_mat)
+  if (inherits(assay_obj, "Assay5")) {
+    assay_obj <- Seurat::SetAssayData(assay_obj, layer = "data", new.data = scgas_mat)
+  } else {
+    assay_obj@data <- scgas_mat
+  }
   seurat_obj[["scGAS"]] <- assay_obj
 
   if (run_dim_reduction) {
