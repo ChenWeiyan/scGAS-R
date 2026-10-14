@@ -66,14 +66,25 @@ test_that("compute helpers return well-formed output", {
   expect_equal(dim(d), c(n, length(cent)))
   expect_true(all(d >= 0))
 
-  alpha <- apply(d, 1, function(x) sort(x, partial = 2)[2])
-  names(alpha) <- cells
+  alpha <- scGAS:::.knn_bandwidth(emb, k = 10, block_size = 30)
+  expect_length(alpha, n)
+  expect_true(all(alpha > 0))
+  # blockwise result equals the brute-force k-th nearest other cell
+  full <- as.matrix(dist(emb))
+  expect_equal(unname(alpha),
+               unname(apply(full, 1, function(x) sort(x)[11])),
+               tolerance = 1e-8)
   rownames(d) <- cells; colnames(d) <- cent
   others <- setdiff(cells, unname(cent))
   W <- scGAS:::.build_weight_matrix(others, unname(cent), d, alpha, 3)
   expect_equal(nrow(W), length(others))
   # each cell's weights over its reference centroids sum to 1
   expect_true(all(abs(Matrix::rowSums(W) - 1) < 1e-8))
+  # tiny bandwidth must not underflow to NaN
+  W_tiny <- scGAS:::.build_weight_matrix(others, unname(cent), d,
+                                         alpha * 1e-6, 3)
+  expect_true(all(is.finite(W_tiny@x)))
+  expect_true(all(abs(Matrix::rowSums(W_tiny) - 1) < 1e-8))
 
   A  <- Matrix(abs(rsparsematrix(n, n, 0.1)), sparse = TRUE)
   M  <- A / pmax(Matrix::colSums(A), 1)

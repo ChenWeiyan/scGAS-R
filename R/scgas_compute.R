@@ -4,7 +4,9 @@
 #' \enumerate{
 #'   \item \strong{Initialisation (scGAS0).}  Each non-centroid cell inherits a
 #'     Gaussian-kernel weighted average of its \code{n_metacell_refs} nearest
-#'     Metacell centroids in LSI space.
+#'     Metacell centroids in LSI space.  The kernel bandwidth of each cell is
+#'     its distance to its \code{kernel_k}-th nearest neighbour among
+#'     \emph{all} cells, so the kernel adapts to local cell density.
 #'   \item \strong{Network propagation (scGAS).}  A mutual-KNN graph is built;
 #'     the top \code{seed_fraction} cells seed a random-walk propagation.
 #'     Scores are outlier-clipped and min-max scaled to \eqn{[0, 1]}.
@@ -25,6 +27,13 @@
 #'   Default \code{30}.
 #' @param n_metacell_refs Number of nearest Metacell centroids used to
 #'   initialise each cell's scGAS0.  Default \code{3}.
+#' @param kernel_k Integer.  Neighbour rank defining the per-cell Gaussian
+#'   kernel bandwidth: \eqn{\alpha_i} is the LSI distance from cell \eqn{i}
+#'   to its \code{kernel_k}-th nearest other cell (self excluded), and the
+#'   weight to centroid \eqn{m} is \eqn{\exp(-(d_{im}/\alpha_i)^2)}.  Smaller
+#'   values give a sharper, more local kernel.  Distances are computed exactly
+#'   in blocks, so memory is \eqn{O(n)} per block rather than
+#'   \eqn{O(n^2)}.  Default \code{30}.
 #' @param seed_fraction Fraction of top-scoring cells used as propagation
 #'   seeds.  Default \code{0.10}.
 #' @param gamma Random-walk restart probability.  Default \code{0.05}.
@@ -87,6 +96,7 @@ scgas_compute <- function(seurat_obj,
                           lsi_dims          = 2:30,
                           knn_k             = 30L,
                           n_metacell_refs   = 3L,
+                          kernel_k          = 30L,
                           seed_fraction     = 0.10,
                           gamma             = 0.05,
                           outlier_quantile  = 0.95,
@@ -133,6 +143,7 @@ scgas_compute <- function(seurat_obj,
          "Run scgas_metacell() first.")
 
   stopifnot(
+    is.numeric(kernel_k), length(kernel_k) == 1L, kernel_k >= 1,
     is.numeric(seed_fraction), seed_fraction > 0, seed_fraction <= 1,
     is.numeric(gamma), gamma > 0
   )
@@ -157,9 +168,12 @@ scgas_compute <- function(seurat_obj,
   rownames(dist_to_centroids) <- rownames(embeddings)
   colnames(dist_to_centroids) <- centroid_cells
 
-  k_band    <- min(knn_k, ncol(dist_to_centroids))
-  alpha_vec <- apply(dist_to_centroids, 1, function(x) sort(x, partial = k_band)[k_band])
-  names(alpha_vec) <- rownames(embeddings)
+  ## Per-cell bandwidth: distance to the kernel_k-th nearest cell among ALL
+  ## cells (local scale), not among centroids.
+  kernel_k <- min(as.integer(kernel_k), nrow(embeddings) - 1L)
+  if (verbose) message("[scGAS] Computing Gaussian kernel bandwidth (kernel_k = ",
+                       kernel_k, ")")
+  alpha_vec <- .knn_bandwidth(embeddings, kernel_k)
 
   centroid_names <- unname(centroid_cells)
   centroid_idx   <- match(centroid_names, cell_names)
@@ -373,10 +387,34 @@ scgas_add_assay <- function(seurat_obj,
   return(centroids)
 }
 
+## Per-cell Gaussian kernel bandwidth: Euclidean distance from each cell to
+## its k-th nearest OTHER cell (self excluded).  Exact all-cell distances are
+## computed block by block, so peak memory is block_size x n_cells instead of
+## the full n_cells x n_cells matrix.
+.knn_bandwidth <- function(embeddings, k, block_size = 1000L) {
+  n <- nrow(embeddings)
+  stopifnot(k >= 1L, k <= n - 1L)
+  alpha  <- numeric(n)
+  starts <- seq.int(1L, n, by = block_size)
+  for (s in starts) {
+    idx <- s:min(s + block_size - 1L, n)
+    blk <- .cross_dist(embeddings[idx, , drop = FALSE], embeddings)
+    ## position 1 after sorting is the cell itself (distance 0) -> take k + 1
+    alpha[idx] <- apply(blk, 1, function(x) sort(x, partial = k + 1L)[k + 1L])
+  }
+  names(alpha) <- rownames(embeddings)
+  ## guard against duplicated embeddings (zero bandwidth)
+  pmax(alpha, .Machine$double.eps)
+}
+
 ## Builds a sparse n_other x n_centroids weight matrix.
 ## Row i holds the normalised Gaussian weights for other_cells[i] over its
 ## top n_ref nearest Metacell centroids.  Replaces the per-cell list built by
 ## .build_cell_refs, allowing vectorised W_init %*% gas_mc in workers.
+## The kernel is monotone in distance, so the top n_ref weights are the n_ref
+## nearest centroids.  The exponent is shifted by its minimum before exp() so
+## that a small bandwidth cannot underflow all weights to 0 (-> NaN); the
+## shift cancels in the normalisation.
 .build_weight_matrix <- function(other_cells, centroid_names,
                                  dist_to_centroids, alpha_vec, n_metacell_refs) {
   n_other <- length(other_cells)
@@ -389,10 +427,9 @@ scgas_add_assay <- function(seurat_obj,
     cell      <- other_cells[i]
     alpha     <- alpha_vec[cell]
     raw_dists <- dist_to_centroids[cell, centroid_names]
-    wgt       <- exp(-(raw_dists / alpha)^2)
-    wgt       <- wgt / sum(wgt)
-    top_j     <- order(wgt, decreasing = TRUE)[seq_len(n_ref)]
-    wgt_top   <- wgt[top_j]
+    top_j     <- order(raw_dists)[seq_len(n_ref)]
+    z         <- (raw_dists[top_j] / alpha)^2
+    wgt_top   <- exp(-(z - min(z)))
     wgt_top   <- wgt_top / sum(wgt_top)
     idx       <- seq.int((i - 1L) * n_ref + 1L, length.out = n_ref)
     ri[idx]   <- i
