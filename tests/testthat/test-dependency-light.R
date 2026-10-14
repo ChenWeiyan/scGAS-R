@@ -141,3 +141,21 @@ test_that("cpf S3 methods dispatch (guards NAMESPACE S3method registration)", {
   expect_output(print(cpf), "Chromatin Potential Field")
   expect_output(summary(cpf), "Arrow magnitude")
 })
+
+test_that(".rename_seqlevels_offline converts UCSC <-> NCBI without network", {
+  skip_if_not_installed("GenomicRanges")
+  gr <- GenomicRanges::GRanges(
+    seqnames = c("1", "2", "MT", "GL000192.1"),
+    ranges   = IRanges::IRanges(start = c(100, 200, 300, 400), width = 10)
+  )
+
+  ucsc <- scGAS:::.rename_seqlevels_offline(gr, "UCSC")
+  expect_equal(GenomeInfoDb::seqlevels(ucsc), c("chr1", "chr2", "chrM"))
+  expect_equal(as.character(GenomicRanges::seqnames(ucsc)),
+               c("chr1", "chr2", "chrM"))
+  expect_length(ucsc, 3L)
+
+  ncbi <- scGAS:::.rename_seqlevels_offline(ucsc, "NCBI")
+  expect_equal(GenomeInfoDb::seqlevels(ncbi), c("1", "2", "MT"))
+  expect_equal(GenomicRanges::start(ncbi), c(100, 200, 300))
+})

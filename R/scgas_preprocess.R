@@ -558,7 +558,7 @@ scgas_preprocess <- function(fragment_path,
 
     if (ann_style != frag_style) {
       if (verbose) message("[scGAS] Setting annotation seqlevels style to ", frag_style)
-      GenomeInfoDb::seqlevelsStyle(annotation) <- frag_style
+      annotation <- .rename_seqlevels_offline(annotation, frag_style)
     } else {
       if (verbose) message("[scGAS] Annotation seqlevels style already ", frag_style, ".")
     }
@@ -570,4 +570,26 @@ scgas_preprocess <- function(fragment_path,
   }
 
   return(annotation)
+}
+
+
+# --------------------------------------------------------------------------
+# .rename_seqlevels_offline: convert GRanges seqlevels between UCSC ("chr1",
+# "chrM") and NCBI ("1", "MT") naming without network access.
+# GenomeInfoDb::seqlevelsStyle<- downloads chromInfo from UCSC, which fails on
+# certificate mismatches and on offline compute nodes.  Non-standard contigs
+# are dropped first so that only chromosomes with a known mapping remain.
+# --------------------------------------------------------------------------
+#' @keywords internal
+.rename_seqlevels_offline <- function(gr, target_style = c("UCSC", "NCBI")) {
+  target_style <- match.arg(target_style)
+  gr <- GenomeInfoDb::keepStandardChromosomes(gr, pruning.mode = "coarse")
+  lv <- sub("^chr", "", GenomeInfoDb::seqlevels(gr))
+  new_levels <- if (target_style == "UCSC") {
+    paste0("chr", ifelse(lv == "MT", "M", lv))
+  } else {
+    ifelse(lv == "M", "MT", lv)
+  }
+  GenomeInfoDb::seqlevels(gr) <- new_levels
+  gr
 }
