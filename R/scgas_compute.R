@@ -158,6 +158,12 @@ scgas_compute <- function(seurat_obj,
 
   if (verbose) message("[scGAS] Building mutual-KNN graph (k = ", knn_k, ")")
   mutualknn <- SCAVENGE::getmutualknn(embeddings, knn_k)
+  ## Column-stochastic transition matrix, as in SCAVENGE::randomWalk_sparse
+  ## (intM <- t(t(intM) / colSums(intM))).  Built once and reused for all genes.
+  deg       <- Matrix::colSums(mutualknn)
+  trans_mat <- mutualknn %*% Matrix::Diagonal(x = 1 / pmax(deg, 1))
+  dimnames(trans_mat) <- dimnames(mutualknn)
+  rm(mutualknn)
 
   if (verbose) message("[scGAS] Identifying Metacell centroids")
   centroid_cells <- .find_centroids(embeddings, cl_labels, cl_levels)
@@ -220,18 +226,20 @@ scgas_compute <- function(seurat_obj,
     s0[other_idx,    ] <- as.matrix(W_init %*% gmc)        # single matmul
 
     ## ── Seed matrix P0: top seed_fraction cells per gene ───────────────────
-    ## find the n_seed-th largest value in each column as the threshold
-    thresh  <- apply(s0, 2,
-                     function(x) sort(x, partial = n_seed, decreasing = TRUE)[n_seed])
-    seed_mx <- sweep(s0, 2, thresh, ">=")                   # logical n_cells × nc
-    col_n   <- pmax(1L, colSums(seed_mx))
-    P0      <- sweep(seed_mx * 1.0, 2, col_n, "/")         # uniform seed weights
+    ## Exactly n_seed seeds per gene (ties broken by cell order, as in the
+    ## original sort(..., decreasing = TRUE, index.return = TRUE)), each with
+    ## uniform weight 1 / n_seed.  Note: sort(partial =, decreasing = TRUE) is
+    ## not supported by R and must not be used here.
+    seed_idx <- apply(s0, 2, function(x) order(x, decreasing = TRUE)[seq_len(n_seed)])
+    seed_idx <- matrix(seed_idx, nrow = n_seed)             # keep matrix shape if nc == 1
+    P0       <- matrix(0, length(cell_names), nc)
+    P0[cbind(as.vector(seed_idx), rep(seq_len(nc), each = n_seed))] <- 1 / n_seed
 
     ## ── Batched random walk ─────────────────────────────────────────────────
     ## Replaces nc individual SCAVENGE::randomWalk_sparse calls with one
-    ## sparse × dense matrix iteration: mutualknn %*% P  (BLAS3)
-    P <- .batched_rw(mutualknn, P0, gamma)
-    rm(gmc, s0, seed_mx, P0); gc()
+    ## sparse × dense matrix iteration: trans_mat %*% P  (BLAS3)
+    P <- .batched_rw(trans_mat, P0, gamma)
+    rm(gmc, s0, seed_idx, P0); gc()
 
     ## ── Outlier cap + min-max scale per gene (column of P) ─────────────────
     caps <- apply(P, 2, quantile, probs = outlier_quantile, names = FALSE)
@@ -448,14 +456,19 @@ scgas_add_assay <- function(seurat_obj,
 ## M    — column-stochastic sparse transition matrix (n_cells × n_cells)
 ## P0   — dense seed matrix (n_cells × n_genes), columns sum to 1
 ## Returns a dense matrix of the same dimensions as P0.
-## Convergence: iterate until max element-wise change < tol, or max_iter.
-.batched_rw <- function(M, P0, gamma, max_iter = 30L, tol = 1e-6) {
+## Convergence: iterate until the max per-gene L1 change < tol (SCAVENGE rule), or max_iter.
+.batched_rw <- function(M, P0, gamma, max_iter = 1000L, tol = 1e-5) {
   c1 <- 1 - gamma
   P  <- P0                                 # base::matrix throughout
   for (i in seq_len(max_iter)) {
     P_new <- c1 * as.matrix(M %*% P) + gamma * P0   # coerce dgeMatrix → matrix
-    if (max(abs(P_new - P)) < tol) { P <- P_new; break }
+    ## same stopping rule as SCAVENGE::randomWalk_sparse (L1 change per gene)
+    delta <- max(colSums(abs(P_new - P)))
     P <- P_new
+    if (delta < tol) break
   }
+  if (delta >= tol)
+    warning("[scGAS] Random walk did not converge in ", max_iter,
+            " iterations (max L1 change = ", signif(delta, 3), ").")
   P
 }
